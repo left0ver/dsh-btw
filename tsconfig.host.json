@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "composite": true },
+  "include": ["src/index.ts", "src/protocol.ts"]
+}

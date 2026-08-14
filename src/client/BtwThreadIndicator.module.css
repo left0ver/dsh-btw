@@ -1,0 +1,35 @@
+.root {
+  position: absolute;
+  bottom: 8px;
+  left: max(
+    var(--dsh-composer-side-clearance),
+    calc((100% - var(--dsh-composer-card-max-width)) / 2)
+  );
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 20px;
+  padding-right: 10px;
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 20px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.root[data-thread-kind='child'] {
+  color: var(--dsw-alias-state-business-primary);
+}
+
+.root[data-thread-kind='main'] .label {
+  color: var(--dsw-alias-state-success-primary);
+}
+
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
