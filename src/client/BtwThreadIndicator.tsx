@@ -1,33 +1,35 @@
 import type { SessionId, SessionListState } from '@deepseek-ai/dsh-client-runtime/client'
-import type { SnapshotSelectorHook } from '@deepseek-ai/dsh-client-ui-slots'
-import { BTW_LABEL } from '../protocol.ts'
+import type { PropsLocale, SnapshotSelectorHook } from '@deepseek-ai/dsh-client-ui-slots'
+import { isBtwLabel } from '../protocol.ts'
+import { BTW_LOCALE_NS } from '../locales.ts'
 import css from './BtwThreadIndicator.module.css'
 
 export interface BtwThreadIndicatorProps {
   readonly sessionId: SessionId
   readonly useSessions: SnapshotSelectorHook<SessionListState>
+  readonly t: PropsLocale<typeof BTW_LOCALE_NS>['t']
 }
 
 /** Ambient main/side identity shown at the left edge of the composer stats row. */
-export function BtwThreadIndicator({ sessionId, useSessions }: BtwThreadIndicatorProps) {
+export function BtwThreadIndicator({ sessionId, useSessions, t }: BtwThreadIndicatorProps) {
   const summary = useSessions(state => state.byId[sessionId])
   const catalog = useSessions(state => state.subagentsByParent[sessionId])
   const entries = (catalog as {
     entries?: readonly { kind: string; mode?: string; label?: string }[]
   } | undefined)?.entries
-  const isChild = summary?.parentId !== undefined && summary.displayTitle === BTW_LABEL
+  const isChild = summary?.parentId !== undefined && isBtwLabel(summary.displayTitle)
   const hasChild = entries?.some(entry => entry.kind === 'child'
     && entry.mode === 'continuable'
-    && entry.label === BTW_LABEL) === true
+    && isBtwLabel(entry.label)) === true
 
   if (!isChild && !hasChild) return null
 
-  const label = isChild ? '子线程' : '主线程'
+  const label = t(isChild ? 'thread.child' : 'thread.main')
   return (
     <div
       className={css.root}
       data-thread-kind={isChild ? 'child' : 'main'}
-      aria-label={`当前：${label}`}
+      aria-label={t('thread.current', { label })}
     >
       <span className={css.dot} aria-hidden />
       <span className={css.label}>{label}</span>

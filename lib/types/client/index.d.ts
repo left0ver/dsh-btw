@@ -1,6 +1,13 @@
 /** Browser half of the `/btw` plugin. */
 import type { ClientContext, SessionId } from '@deepseek-ai/dsh-client-runtime/client';
 import { btwAddress } from './BtwHeaderAction.tsx';
+import { type BtwLocaleKey } from '../locales.ts';
+declare module '@deepseek-ai/dsh-client-ui-slots' {
+    interface LocaleNamespaceMap {
+        /** dsh-btw navigation and thread identity copy. */
+        btw: BtwLocaleKey;
+    }
+}
 export declare const inject: string[];
 interface BtwNavigation {
     refreshSubagents(parentId: SessionId): Promise<void>;

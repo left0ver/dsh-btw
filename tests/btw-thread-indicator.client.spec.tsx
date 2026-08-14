@@ -4,9 +4,13 @@ import { cleanup, render } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { SessionId, SessionListState } from '@deepseek-ai/dsh-client-runtime/client'
 import { BtwThreadIndicator } from '../src/client/BtwThreadIndicator.tsx'
+import { btwText, type BtwLocaleId } from '../src/locales.ts'
 
 const parentId = 'parent' as SessionId
 const childId = 'child' as SessionId
+
+const translate = (locale: BtwLocaleId) =>
+  (key: Parameters<typeof btwText>[1], params?: Parameters<typeof btwText>[2]) => btwText(locale, key, params)
 
 afterEach(cleanup)
 
@@ -57,6 +61,7 @@ describe('BtwThreadIndicator', () => {
     const view = render(<BtwThreadIndicator
       sessionId={parentId}
       useSessions={selector => selector(sessions)}
+      t={translate('zh')}
     />)
     expect(view.queryByLabelText('当前：主线程')).toBeNull()
     expect(view.queryByLabelText('当前：子线程')).toBeNull()
@@ -83,6 +88,7 @@ describe('BtwThreadIndicator', () => {
     const view = render(<BtwThreadIndicator
       sessionId={childId}
       useSessions={selector => selector(sessions)}
+      t={translate('zh')}
     />)
     expect(view.queryByLabelText('当前：主线程')).toBeNull()
     expect(view.queryByLabelText('当前：子线程')).toBeNull()
@@ -93,6 +99,7 @@ describe('BtwThreadIndicator', () => {
     const view = render(<BtwThreadIndicator
       sessionId={parentId}
       useSessions={selector => selector(sessions)}
+      t={translate('zh')}
     />)
     expect(view.getByLabelText('当前：主线程')).toBeTruthy()
   })
@@ -102,7 +109,18 @@ describe('BtwThreadIndicator', () => {
     const view = render(<BtwThreadIndicator
       sessionId={childId}
       useSessions={selector => selector(sessions)}
+      t={translate('zh')}
     />)
     expect(view.getByLabelText('当前：子线程')).toBeTruthy()
+  })
+
+  it('switches an existing child indicator to English copy', () => {
+    const sessions = state('child')
+    const view = render(<BtwThreadIndicator
+      sessionId={childId}
+      useSessions={selector => selector(sessions)}
+      t={translate('en')}
+    />)
+    expect(view.getByLabelText('Current: Side thread')).toBeTruthy()
   })
 })

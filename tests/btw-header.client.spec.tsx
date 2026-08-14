@@ -6,6 +6,7 @@ import type { ConversationSnapshot, SessionId, SessionListState } from '@deepsee
 import type { InputState } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { BtwHeaderAction, type BtwHeaderActionProps } from '../src/client/BtwHeaderAction.tsx'
 import { BTW_LABEL, BTW_OPENED_PREFIX } from '../src/protocol.ts'
+import { btwText, en, type BtwLocaleId } from '../src/locales.ts'
 
 const parentId = 'parent' as SessionId
 const childId = 'child' as SessionId
@@ -26,7 +27,7 @@ function input(draft = ''): InputState {
   }
 }
 
-function list(side: boolean): SessionListState {
+function list(side: boolean, locale: BtwLocaleId = 'zh'): SessionListState {
   const current = side ? childId : parentId
   return {
     ids: [parentId],
@@ -41,7 +42,7 @@ function list(side: boolean): SessionListState {
       ...(side ? {
         [childId]: {
           id: childId,
-          displayTitle: BTW_LABEL,
+          displayTitle: locale === 'en' ? en['thread.title'] : BTW_LABEL,
           parentId,
           origin: 'subagent' as const,
           running: false,
@@ -56,7 +57,7 @@ function list(side: boolean): SessionListState {
       [parentId]: {
         entries: [{
           kind: 'child', id: childId, activity: 'running', hasChildren: false,
-          mode: 'continuable', label: BTW_LABEL,
+          mode: 'continuable', label: locale === 'en' ? en['thread.title'] : BTW_LABEL,
         }],
         parentAvailable: true,
         state: 'ready',
@@ -75,9 +76,12 @@ function props(options: {
   nodes?: ConversationSnapshot['nodes']
   open?: (id: SessionId) => void
   openSide?: (parent: SessionId, child: SessionId) => Promise<boolean>
+  refreshSubagents?: (parent: SessionId) => Promise<void>
+  locale?: BtwLocaleId
 } = {}): BtwHeaderActionProps {
   const side = options.side ?? false
-  const sessions = list(side)
+  const locale = options.locale ?? 'zh'
+  const sessions = list(side, locale)
   const snapshot = {
     nodes: options.nodes ?? [],
     running: options.running ?? false,
@@ -93,6 +97,8 @@ function props(options: {
     useWorkspaces: (() => { throw new Error('unused') }) as never,
     open: options.open ?? vi.fn(),
     openSide: options.openSide ?? vi.fn().mockResolvedValue(true),
+    refreshSubagents: options.refreshSubagents ?? vi.fn().mockResolvedValue(undefined),
+    t: (key, params) => btwText(locale, key, params),
   }
 }
 
@@ -190,5 +196,49 @@ describe('BtwHeaderAction', () => {
     expect(view.queryByRole('button', { name: '关闭 BTW' })).toBeNull()
     fireEvent.keyDown(document, { key: 'Escape' })
     expect(open).not.toHaveBeenCalled()
+  })
+
+  it('renders English navigation copy for an English locale seat', () => {
+    const side = render(<BtwHeaderAction {...props({ side: true, locale: 'en' })} />)
+    expect(side.getByRole('button', { name: 'Back to main thread' })).toBeTruthy()
+    side.unmount()
+    const parent = render(<BtwHeaderAction {...props({ locale: 'en' })} />)
+    expect(parent.getByRole('button', { name: 'Back to side thread' })).toBeTruthy()
+  })
+
+  it('opens a child from an English localized success outcome', async () => {
+    const openSide = vi.fn().mockResolvedValue(true)
+    const view = render(<BtwHeaderAction {...props({ locale: 'en', openSide })} />)
+    view.rerender(<BtwHeaderAction {...props({
+      locale: 'en',
+      openSide,
+      nodes: [{
+        kind: 'command',
+        seq: 9,
+        time: 1,
+        commandId: 'cmd-en' as never,
+        name: 'btw',
+        args: null,
+        outcome: { kind: 'success', text: `Side thread created: ${childId}` },
+      }],
+    })} />)
+    await waitFor(() => {
+      expect(openSide).toHaveBeenCalledWith(parentId, childId)
+    })
+  })
+
+  it('refreshes the parent catalog when the localized child label is stale', async () => {
+    const refreshSubagents = vi.fn().mockResolvedValue(undefined)
+    const englishState = list(false, 'en')
+    const base = props({ locale: 'zh', refreshSubagents })
+    render(
+      <BtwHeaderAction
+        {...base}
+        useSessions={selector => selector(englishState)}
+      />,
+    )
+    await waitFor(() => {
+      expect(refreshSubagents).toHaveBeenCalledWith(parentId)
+    })
   })
 })

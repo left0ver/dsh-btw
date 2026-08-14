@@ -1,5 +1,5 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": { "composite": true },
-  "include": ["src/index.ts", "src/protocol.ts"]
+  "include": ["src/index.ts", "src/locales.ts", "src/protocol.ts"]
 }

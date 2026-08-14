@@ -3,12 +3,13 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type {} from '@deepseek-ai/dsh-commands'
+import type { CommandInvocation } from '@deepseek-ai/dsh-commands'
+import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import type SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import type { EphemeralContinuableHandle } from '@deepseek-ai/dsh-subagent'
 import type ToolRuntime from '@deepseek-ai/dsh-tools'
 import type { SessionId } from '@deepseek-ai/dsh-session'
-import { BTW_LABEL, BTW_OPENED_PREFIX } from './protocol.ts'
+import { btwText, resolveBtwLocale, type BtwLocaleId } from './locales.ts'
 
 export const name = 'btw'
 export const inject = ['commands', 'subagents']
@@ -37,6 +38,7 @@ const SIDE_INSTRUCTIONS = [
 ].join(' ')
 
 const SUBAGENT_TOOL_NAMES = ['subagent', 'subagent_fork', 'send_message', 'list_agents'] as const
+const LOCALE_SETTINGS_NAMESPACE = settingsNamespace('locale')
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -55,6 +57,7 @@ export function apply(ctx: Context, config: Config): void {
   const activeByParent = new Map<SessionId, ActiveBtw>()
   const activeByChild = new Map<SessionId, ActiveBtw>()
   const starting = new Set<SessionId>()
+  let locale: BtwLocaleId = resolveBtwLocale(ctx.get('settings')?.get(LOCALE_SETTINGS_NAMESPACE))
 
   const disposeEntry = async (entry: ActiveBtw): Promise<void> => {
     if (activeByParent.get(entry.parent.id) !== entry) return
@@ -78,21 +81,18 @@ export function apply(ctx: Context, config: Config): void {
     }
   })
 
-  ctx.commands.register({
-    name: 'btw',
-    description: '创建一个临时会话继承当前的上下文，用于临时聊天',
-    input: { hint: '给智能体发消息' },
-    recordInput: false,
-    async handler({ agent, rawInput, signal }) {
+  const handler = async ({ agent, rawInput, signal }: CommandInvocation) => {
+      const text = (key: Parameters<typeof btwText>[1], params?: Readonly<Record<string, unknown>>) =>
+        btwText(locale, key, params)
       const side = activeByChild.get(agent.id)
       if (side !== undefined) {
-        return { kind: 'error', text: 'BTW 侧会话中不能再次打开 BTW 会话。' }
+        return { kind: 'error' as const, text: text('command.error.nested') }
       }
       if (!agent.session.events.some(event => event.type === 'turn/end')) {
-        return { kind: 'error', text: '主会话至少完成一轮对话后才能使用 /btw。' }
+        return { kind: 'error' as const, text: text('command.error.noCompletedTurn') }
       }
       if (activeByParent.has(agent.id) || starting.has(agent.id)) {
-        return { kind: 'error', text: '当前主会话已经有一个 BTW 侧会话；请使用 Ctrl+/ 切换。' }
+        return { kind: 'error' as const, text: text('command.error.duplicate') }
       }
 
       starting.add(agent.id)
@@ -102,7 +102,7 @@ export function apply(ctx: Context, config: Config): void {
         const prompt = rawInput.trim()
         const handle = await subagents.startEphemeralContinuable({
           provider: config.provider ?? 'fork',
-          label: BTW_LABEL,
+          label: text('thread.title'),
           request: {
             parent: agent,
             ...prompt === '' ? {} : { prompt: [{ type: 'text', text: prompt }] },
@@ -114,12 +114,31 @@ export function apply(ctx: Context, config: Config): void {
         const entry = { parent: agent, handle }
         activeByParent.set(agent.id, entry)
         activeByChild.set(handle.childId, entry)
-        return { kind: 'success', text: `${BTW_OPENED_PREFIX}${handle.childId}` }
+        return { kind: 'success' as const, text: text('command.opened', { id: handle.childId }) }
       } catch (error: unknown) {
-        return { kind: 'error', text: `无法打开 BTW 会话：${errorText(error)}` }
+        return { kind: 'error' as const, text: text('command.error.openFailed', { error: errorText(error) }) }
       } finally {
         starting.delete(agent.id)
       }
-    },
+  }
+
+  const registerCommand = () => ctx.commands.register({
+    name: 'btw',
+    description: btwText(locale, 'command.description'),
+    input: { hint: btwText(locale, 'command.hint') },
+    recordInput: false,
+    handler,
   })
+  let unregisterCommand = registerCommand()
+  ctx.on('settings/updated', (namespace, next) => {
+    if (namespace !== LOCALE_SETTINGS_NAMESPACE) return
+    const nextLocale = resolveBtwLocale(next)
+    if (nextLocale === locale) return
+    locale = nextLocale
+    const childLabel = btwText(locale, 'thread.title')
+    for (const entry of activeByParent.values()) entry.handle.relabel(childLabel)
+    unregisterCommand()
+    unregisterCommand = registerCommand()
+  })
+  ctx.effect(() => () => { unregisterCommand() }, 'btw.command()')
 }

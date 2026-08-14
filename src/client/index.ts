@@ -2,10 +2,19 @@
 
 import type { ClientContext, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
+import type {} from '@deepseek-ai/dsh-client-locale/client'
 import { BtwHeaderAction, btwAddress, type BtwHeaderInjected } from './BtwHeaderAction.tsx'
 import { BtwThreadIndicator } from './BtwThreadIndicator.tsx'
+import { BTW_LOCALE_NS, en, zh, type BtwLocaleKey } from '../locales.ts'
 
-export const inject = ['sessions', 'slots']
+declare module '@deepseek-ai/dsh-client-ui-slots' {
+  interface LocaleNamespaceMap {
+    /** dsh-btw navigation and thread identity copy. */
+    btw: BtwLocaleKey
+  }
+}
+
+export const inject = ['sessions', 'slots', 'locale']
 
 interface BtwNavigation {
   refreshSubagents(parentId: SessionId): Promise<void>
@@ -30,6 +39,7 @@ export async function openBtwSide(
 /** Register header controls and full-page side navigation. */
 export function apply(ctx: ClientContext): void {
   const sessions = ctx.sessions
+  ctx.effect(() => ctx.locale.register(BTW_LOCALE_NS, { zh, en }), 'dsh-btw: dictionaries')
   const injected = (): BtwHeaderInjected => ({
     open(id) {
       sessions.open(id)
@@ -41,6 +51,9 @@ export function apply(ctx: ClientContext): void {
       })
       return true
     },
+    refreshSubagents(parentId) {
+      return sessions.refreshSubagents(parentId)
+    },
   })
   ctx.slots.inject(
     'conversation.session.header.actions',
@@ -48,6 +61,7 @@ export function apply(ctx: ClientContext): void {
       name: 'conversation.session.header.actions',
       id: 'btw',
       order: 5,
+      locale: BTW_LOCALE_NS,
       inject: injected,
     }, BtwHeaderAction),
   )
@@ -57,6 +71,7 @@ export function apply(ctx: ClientContext): void {
       name: 'conversation.composer.dock',
       id: 'btw-thread-indicator',
       order: -10,
+      locale: BTW_LOCALE_NS,
     }, BtwThreadIndicator),
   )
 }
