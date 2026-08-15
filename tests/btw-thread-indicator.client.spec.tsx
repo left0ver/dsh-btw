@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import type { SessionId, SessionListState } from '@deepseek-ai/dsh-client-runtime/client'
 import { BtwThreadIndicator } from '../src/client/BtwThreadIndicator.tsx'
 import { btwText, type BtwLocaleId } from '../src/locales.ts'
+import { clearBtwPairs, rememberBtwPair } from '../src/client/btw-state.ts'
 
 const parentId = 'parent' as SessionId
 const childId = 'child' as SessionId
@@ -12,10 +13,14 @@ const childId = 'child' as SessionId
 const translate = (locale: BtwLocaleId) =>
   (key: Parameters<typeof btwText>[1], params?: Parameters<typeof btwText>[2]) => btwText(locale, key, params)
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  clearBtwPairs()
+})
 
 function state(current: 'ordinary' | 'main' | 'child'): SessionListState {
   const hasSideThread = current !== 'ordinary'
+  if (hasSideThread) rememberBtwPair(parentId, childId)
   return {
     ids: [parentId],
     byId: {
@@ -30,8 +35,6 @@ function state(current: 'ordinary' | 'main' | 'child'): SessionListState {
         [childId]: {
           id: childId,
           displayTitle: '子线程',
-          parentId,
-          origin: 'subagent' as const,
           running: false,
           blank: false,
           updatedAt: 2,

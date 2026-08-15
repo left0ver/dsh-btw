@@ -1,144 +1,245 @@
 /** Host half of the Codex-style `/btw` side-conversation plugin. */
 
+import { randomUUID } from 'node:crypto'
+import { rmdir, unlink } from 'node:fs/promises'
+import { basename, dirname } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import type { CommandInvocation } from '@deepseek-ai/dsh-commands'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
-import type SubagentRuntime from '@deepseek-ai/dsh-subagent'
-import type { EphemeralContinuableHandle } from '@deepseek-ai/dsh-subagent'
-import type ToolRuntime from '@deepseek-ai/dsh-tools'
-import type { SessionId } from '@deepseek-ai/dsh-session'
+import { SessionId, type SessionEvent, type SessionHeader } from '@deepseek-ai/dsh-session'
 import { btwText, resolveBtwLocale, type BtwLocaleId } from './locales.ts'
+import { btwSessionId } from './protocol.ts'
 
 export const name = 'btw'
-export const inject = ['commands', 'subagents']
+export const inject = ['commands', 'agents', 'sessionPersistence']
 
 /** Host configuration. */
-export interface Config {
-  /** Continuable provider used to capture the parent's completed history. */
-  provider?: string
+export interface Config {}
+
+export const Config: z<Config> = z.object({})
+
+interface AgentPresetsPort {
+  composedPreset(ctx: Context): string | undefined
+  composeFrom(agentCtx: Context, parentCtx: Context): string | undefined
 }
 
-export const Config: z<Config> = z.object({
-  provider: z.string().default('fork'),
-})
+interface SessionPersistencePort {
+  locate(header: SessionHeader): { readonly kind: string; readonly path: string } | undefined
+}
+
+interface SessionTitlePort {
+  rename(session: Agent['session'], title: string): unknown
+}
+
+interface PermissionPresetsPort {
+  current(events: readonly SessionEvent[]): string
+  set(session: Agent['session'], name: string): void
+}
 
 interface ActiveBtw {
-  readonly parent: Agent
-  readonly handle: EphemeralContinuableHandle
+  readonly parentId: SessionId
+  readonly childId: SessionId
+  readonly handle: AgentHandle
+  closing: boolean
 }
 
-const SIDE_INSTRUCTIONS = [
-  'You are in a temporary side conversation opened with /btw.',
-  'Treat the inherited parent conversation as reference-only background. Do not continue its active task unless the user explicitly asks.',
-  'Answer the side conversation directly and keep its messages independent from the parent conversation.',
-  'Do not create or message subagents from this side conversation.',
-  'Do not modify files, run commands with side effects, or change external state unless the user explicitly requests that action in this side conversation.',
-].join(' ')
-
-const SUBAGENT_TOOL_NAMES = ['subagent', 'subagent_fork', 'send_message', 'list_agents'] as const
 const LOCALE_SETTINGS_NAMESPACE = settingsNamespace('locale')
+const CLOSE_DELAY_MS = 100
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-/** Register `/btw` and own every process-local side handle. */
-export function apply(ctx: Context, config: Config): void {
-  const subagents = ctx.get('subagents') as SubagentRuntime | undefined
-  if (subagents === undefined) throw new Error('dsh-btw requires the subagents service')
-  if (typeof subagents.startEphemeralContinuable !== 'function') {
-    throw new Error(
-      'dsh-btw requires an rc.6 host build containing '
-      + 'subagents.startEphemeralContinuable; rebuild and restart DeepSeek Harness',
-    )
+/** Snapshot everything before this `/btw` command, provided the source is between turns. */
+export function completedContextSeed(
+  agent: Agent,
+  commandId: CommandInvocation['commandId'],
+): readonly SessionEvent[] | undefined {
+  const events = agent.session.events
+  const commandIndex = events.findIndex(event => event.type === 'command/run'
+    && event.data.commandId === commandId)
+  const cut = commandIndex < 0 ? events.length : commandIndex
+  const prefix = events.slice(0, cut)
+  const lastTurnBoundary = prefix.findLast(event => event.type === 'turn/start' || event.type === 'turn/end')
+  if (lastTurnBoundary?.type !== 'turn/end') return undefined
+  return prefix
+}
+
+async function removeOwnedJsonlArtifact(ctx: Context, agent: Agent): Promise<void> {
+  const persistence = ctx.get('sessionPersistence') as SessionPersistencePort | undefined
+  const location = persistence?.locate(agent.session.header)
+  if (location?.kind !== 'jsonl') return
+  const artifactName = basename(location.path)
+  const ownerDir = dirname(location.path)
+  if ((artifactName !== 'session.jsonl' && artifactName !== 'session.jsonl.zstd')
+    || basename(ownerDir) !== agent.id) {
+    throw new Error(`refusing to remove unexpected session artifact path: ${location.path}`)
   }
+  try {
+    await unlink(location.path)
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+  }
+  try {
+    await rmdir(ownerDir)
+  } catch (error: unknown) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code !== 'ENOENT' && code !== 'ENOTEMPTY') throw error
+  }
+}
+
+/** Register `/btw`, creating parentless AgentHandles rather than subagents. */
+export function apply(ctx: Context, _config: Config): void {
   const activeByParent = new Map<SessionId, ActiveBtw>()
   const activeByChild = new Map<SessionId, ActiveBtw>()
   const starting = new Set<SessionId>()
   let locale: BtwLocaleId = resolveBtwLocale(ctx.get('settings')?.get(LOCALE_SETTINGS_NAMESPACE))
 
-  const disposeEntry = async (entry: ActiveBtw): Promise<void> => {
-    if (activeByParent.get(entry.parent.id) !== entry) return
-    await entry.handle.dispose()
-    if (activeByParent.get(entry.parent.id) === entry) activeByParent.delete(entry.parent.id)
-    if (activeByChild.get(entry.handle.childId) === entry) activeByChild.delete(entry.handle.childId)
+  const forgetEntry = (entry: ActiveBtw): void => {
+    if (activeByParent.get(entry.parentId) === entry) activeByParent.delete(entry.parentId)
+    if (activeByChild.get(entry.childId) === entry) activeByChild.delete(entry.childId)
+  }
+
+  const closeEntry = async (entry: ActiveBtw): Promise<void> => {
+    if (entry.closing) return
+    entry.closing = true
+    forgetEntry(entry)
+    const child = entry.handle.agent
+    try {
+      await ctx.sessions.flush(child.session)
+    } catch (error: unknown) {
+      ctx.logger.warn(`btw: failed to flush temporary session "${entry.childId}": ${errorText(error)}`)
+    }
+    try {
+      await entry.handle.dispose()
+      // session/disposed starts persistence retirement asynchronously.
+      await new Promise<void>(resolve => { setTimeout(resolve, 0) })
+      await removeOwnedJsonlArtifact(ctx, child)
+    } catch (error: unknown) {
+      ctx.logger.warn(`btw: failed to dispose temporary session "${entry.childId}": ${errorText(error)}`)
+    }
+  }
+
+  const deferClose = (entry: ActiveBtw): void => {
+    setTimeout(() => { void closeEntry(entry) }, CLOSE_DELAY_MS)
   }
 
   ctx.effect(() => async () => {
-    const settled = await Promise.allSettled([...activeByParent.values()].map(disposeEntry))
-    const failures = settled.flatMap(result => result.status === 'rejected' ? [result.reason] : [])
-    if (failures.length > 0) throw new AggregateError(failures, 'failed to dispose BTW side conversations')
-  }, 'btw.handles()')
+    await Promise.allSettled([...activeByChild.values()].map(closeEntry))
+    activeByParent.clear()
+    activeByChild.clear()
+    starting.clear()
+  }, 'btw.sessions()')
 
   ctx.on('agent/disposed', ({ agent }) => {
-    const entry = activeByParent.get(agent.id)
-    if (entry !== undefined) {
-      void disposeEntry(entry).catch((error: unknown) => {
-        ctx.logger.warn(`btw: parent cleanup failed: ${errorText(error)}`)
-      })
+    const parentEntry = activeByParent.get(agent.id)
+    if (parentEntry !== undefined) {
+      void closeEntry(parentEntry)
+      return
     }
+    const childEntry = activeByChild.get(agent.id)
+    if (childEntry !== undefined) forgetEntry(childEntry)
   })
 
-  const handler = async ({ agent, rawInput, signal }: CommandInvocation) => {
-      const text = (key: Parameters<typeof btwText>[1], params?: Readonly<Record<string, unknown>>) =>
-        btwText(locale, key, params)
-      const side = activeByChild.get(agent.id)
-      if (side !== undefined) {
-        return { kind: 'error' as const, text: text('command.error.nested') }
-      }
-      if (!agent.session.events.some(event => event.type === 'turn/end')) {
-        return { kind: 'error' as const, text: text('command.error.noCompletedTurn') }
-      }
-      if (activeByParent.has(agent.id) || starting.has(agent.id)) {
-        return { kind: 'error' as const, text: text('command.error.duplicate') }
-      }
+  const handler = async ({ agent, commandId, rawInput, signal }: CommandInvocation) => {
+    const text = (key: Parameters<typeof btwText>[1], params?: Readonly<Record<string, unknown>>) =>
+      btwText(locale, key, params)
+    if (activeByChild.has(agent.id)) {
+      return { kind: 'error' as const, text: text('command.error.nested') }
+    }
+    const seed = completedContextSeed(agent, commandId)
+    if (seed === undefined) {
+      return { kind: 'error' as const, text: text('command.error.noCompletedTurn') }
+    }
+    if (activeByParent.has(agent.id) || starting.has(agent.id)) {
+      return { kind: 'error' as const, text: text('command.error.duplicate') }
+    }
 
-      starting.add(agent.id)
-      try {
-        const tools = agent.ctx.get('tools') as ToolRuntime | undefined
-        const deniedTools = SUBAGENT_TOOL_NAMES.filter(tool => tools?.get(tool, agent) !== undefined)
-        const prompt = rawInput.trim()
-        const handle = await subagents.startEphemeralContinuable({
-          provider: config.provider ?? 'fork',
-          label: text('thread.title'),
-          request: {
-            parent: agent,
-            ...prompt === '' ? {} : { prompt: [{ type: 'text', text: prompt }] },
-            ...deniedTools.length === 0 ? {} : { toolFilter: { deny: deniedTools } },
-          },
-          instructions: SIDE_INSTRUCTIONS,
-          signal,
-        })
-        const entry = { parent: agent, handle }
-        activeByParent.set(agent.id, entry)
-        activeByChild.set(handle.childId, entry)
-        return { kind: 'success' as const, text: text('command.opened', { id: handle.childId }) }
-      } catch (error: unknown) {
-        return { kind: 'error' as const, text: text('command.error.openFailed', { error: errorText(error) }) }
-      } finally {
-        starting.delete(agent.id)
+    starting.add(agent.id)
+    let handle: AgentHandle | undefined
+    try {
+      const childId = SessionId(btwSessionId(agent.id, randomUUID()))
+      const presets = agent.ctx.get('agentPresets') as AgentPresetsPort | undefined
+      const agentPreset = presets?.composedPreset(agent.ctx)
+      const permissionPresets = ctx.get('permissionPresets') as PermissionPresetsPort | undefined
+      const permissionPreset = permissionPresets?.current(agent.session.events)
+      handle = await ctx.agents.create({
+        sessionId: childId,
+        seed,
+        meta: {
+          ...(agent.session.header.cwd === undefined ? {} : { cwd: agent.session.header.cwd }),
+          ...(agentPreset === undefined ? {} : { agentPreset }),
+        },
+        agentOptions: { ...agent.options },
+        signal,
+        setup: async childCtx => {
+          presets?.composeFrom(childCtx, agent.ctx)
+          const child = childCtx.agent
+          if (child !== undefined && permissionPresets !== undefined
+            && permissionPreset !== undefined && permissionPreset !== 'custom') {
+            permissionPresets.set(child.session, permissionPreset)
+          }
+          await childCtx.inject(['commands'], commandCtx => {
+            commandCtx.commands.register({
+              name: 'btw-close',
+              description: 'Close the current temporary BTW session.',
+              recordInput: false,
+              handler: closeHandler,
+            })
+          })
+        },
+      })
+      const sessionTitle = ctx.get('sessionTitle') as SessionTitlePort | undefined
+      sessionTitle?.rename(handle.agent.session, text('thread.title'))
+      const entry: ActiveBtw = { parentId: agent.id, childId, handle, closing: false }
+      activeByParent.set(agent.id, entry)
+      activeByChild.set(childId, entry)
+
+      const prompt = rawInput.trim()
+      if (prompt !== '') {
+        handle.agent.followup(createUserMessage({
+          content: [{ type: 'text', text: prompt }],
+          source: { kind: 'user' },
+        }))
       }
+      return { kind: 'success' as const, text: text('command.opened', { id: childId }) }
+    } catch (error: unknown) {
+      if (handle !== undefined) await handle.dispose().catch(() => undefined)
+      return { kind: 'error' as const, text: text('command.error.openFailed', { error: errorText(error) }) }
+    } finally {
+      starting.delete(agent.id)
+    }
   }
 
-  const registerCommand = () => ctx.commands.register({
-    name: 'btw',
-    description: btwText(locale, 'command.description'),
-    input: { hint: btwText(locale, 'command.hint') },
-    recordInput: false,
-    handler,
-  })
-  let unregisterCommand = registerCommand()
+  const closeHandler = ({ agent }: CommandInvocation) => {
+    const entry = activeByChild.get(agent.id)
+    if (entry === undefined) return { kind: 'error' as const, text: 'Not a live BTW session.' }
+    deferClose(entry)
+    return { kind: 'success' as const }
+  }
+
+  const registerCommands = () => {
+    const unregisterBtw = ctx.commands.register({
+      name: 'btw',
+      description: btwText(locale, 'command.description'),
+      input: { hint: btwText(locale, 'command.hint') },
+      recordInput: false,
+      handler,
+    })
+    return () => { unregisterBtw() }
+  }
+
+  let unregisterCommands = registerCommands()
   ctx.on('settings/updated', (namespace, next) => {
     if (namespace !== LOCALE_SETTINGS_NAMESPACE) return
     const nextLocale = resolveBtwLocale(next)
     if (nextLocale === locale) return
     locale = nextLocale
-    const childLabel = btwText(locale, 'thread.title')
-    for (const entry of activeByParent.values()) entry.handle.relabel(childLabel)
-    unregisterCommand()
-    unregisterCommand = registerCommand()
+    unregisterCommands()
+    unregisterCommands = registerCommands()
   })
-  ctx.effect(() => () => { unregisterCommand() }, 'btw.command()')
+  ctx.effect(() => () => { unregisterCommands() }, 'btw.command()')
 }

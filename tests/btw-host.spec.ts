@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { Agent, CreateAgentOptions } from '@deepseek-ai/dsh-agent'
 import CommandRuntime, { CommandId } from '@deepseek-ai/dsh-commands'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
-import type { EphemeralContinuableStartSpec } from '@deepseek-ai/dsh-subagent'
-import { apply } from '../src/index.ts'
+import { apply, completedContextSeed } from '../src/index.ts'
+import { parseBtwParentId } from '../src/protocol.ts'
 
 const contexts: Context[] = []
 
@@ -17,176 +17,170 @@ function agent(ctx: Context, id: string, completed = true): Agent {
   return {
     id: SessionId(id),
     ctx,
+    options: { provider: 'test', model: 'model' },
     session: {
       id: SessionId(id),
-      events: completed ? [{ type: 'turn/end' }] : [],
+      header: { id: SessionId(id), version: 0, createdAt: 1, cwd: '/tmp/project' },
+      events: completed
+        ? [{ type: 'turn/end', seq: 0, time: 1, data: { turn: 1, reason: 'completed' } }]
+        : [],
     },
+    followup: vi.fn(),
   } as unknown as Agent
 }
 
-async function setup(locale: 'zh' | 'en' = 'zh') {
+async function setup(locale: 'zh' | 'en' = 'zh', isolatedChild = false) {
   const ctx = new Context()
   contexts.push(ctx)
   await ctx.plugin(CommandRuntime)
-  ctx.provide('settings', {
-    get: () => ({ preference: locale }),
-  } as never)
+  ctx.provide('settings', { get: () => ({ preference: locale }) } as never)
+  ctx.provide('sessions', { flush: vi.fn().mockResolvedValue(false) } as never)
+  ctx.provide('sessionPersistence', { locate: vi.fn(() => undefined) } as never)
   const dispose = vi.fn().mockResolvedValue(undefined)
-  const relabel = vi.fn()
-  const start = vi.fn(async (_spec: EphemeralContinuableStartSpec) => ({
-    childId: SessionId('side'),
-    followup: vi.fn(),
-    relabel,
-    interrupt: vi.fn(),
-    dispose,
-  }))
-  ctx.provide('subagents', { startEphemeralContinuable: start } as never)
-  apply(ctx, { provider: 'fork' })
-  return { ctx, start, dispose, relabel }
+  const create = vi.fn(async (options: CreateAgentOptions) => {
+    let child: Agent
+    if (isolatedChild) {
+      await ctx.plugin({
+        async apply(childCtx: Context) {
+          child = agent(childCtx, options.sessionId)
+          Object.defineProperty(childCtx, 'agent', { configurable: true, value: child })
+          await options.setup?.(childCtx)
+        },
+      })
+    } else {
+      child = agent(ctx, options.sessionId)
+      Object.defineProperty(ctx, 'agent', { configurable: true, value: child })
+      await options.setup?.(ctx)
+    }
+    return { agent: child, dispose }
+  })
+  ctx.provide('agents', { create } as never)
+  apply(ctx, {})
+  return { ctx, create, dispose }
 }
 
 describe('/btw host command', () => {
-  it('fails at plugin load when the host build lacks the ephemeral API', async () => {
+  it('cuts the snapshot immediately before the current command lifecycle', () => {
     const ctx = new Context()
     contexts.push(ctx)
-    await ctx.plugin(CommandRuntime)
-    ctx.provide('subagents', {} as never)
-    expect(() => apply(ctx, { provider: 'fork' })).toThrow(
-      'dsh-btw requires an rc.6 host build containing subagents.startEphemeralContinuable',
-    )
+    const parent = agent(ctx, 'parent')
+    const commandId = CommandId('cmd-cut')
+    const events = [
+      ...parent.session.events,
+      { type: 'sandbox/mode', seq: 1, time: 2, data: { mode: 'workspace-write', source: 'user' } },
+      { type: 'command/run', seq: 2, time: 3, data: { commandId, name: 'btw', source: { kind: 'user' } } },
+    ] as unknown as typeof parent.session.events
+    Object.defineProperty(parent.session, 'events', { value: events })
+
+    expect(completedContextSeed(parent, commandId)).toEqual(events.slice(0, 2))
+  })
+
+  it('loads without the subagent service', async () => {
+    const { ctx } = await setup()
+    expect(ctx.commands.find(agent(ctx, 'parent'), 'btw')).toBeDefined()
   })
 
   it('requires a completed parent turn', async () => {
-    const { ctx, start } = await setup()
-    const definition = ctx.commands.find(agent(ctx, 'parent', false), 'btw')
-    const result = await definition?.handler({
-      commandId: CommandId('cmd-1'),
-      agent: agent(ctx, 'parent', false),
-      rawInput: '',
-      signal: new AbortController().signal,
+    const { ctx, create } = await setup()
+    const parent = agent(ctx, 'parent', false)
+    const result = await ctx.commands.find(parent, 'btw')?.handler({
+      commandId: CommandId('cmd-1'), agent: parent, rawInput: '', signal: new AbortController().signal,
     })
     expect(result).toEqual({ kind: 'error', text: '主线程至少完成一轮对话后才能使用 /btw。' })
-    expect(start).not.toHaveBeenCalled()
+    expect(create).not.toHaveBeenCalled()
   })
 
-  it('opens once, forwards inline text, and rejects a duplicate', async () => {
-    const { ctx, start } = await setup()
+  it('creates a parentless agent with copied context and inherited runtime options', async () => {
+    const { ctx, create } = await setup()
     const parent = agent(ctx, 'parent')
-    const definition = ctx.commands.find(parent, 'btw')
-    const first = await definition?.handler({
-      commandId: CommandId('cmd-1'),
-      agent: parent,
-      rawInput: ' explain this',
-      signal: new AbortController().signal,
+    const result = await ctx.commands.find(parent, 'btw')?.handler({
+      commandId: CommandId('cmd-open'), agent: parent, rawInput: ' explain this', signal: new AbortController().signal,
     })
-    expect(first).toEqual({ kind: 'success', text: '子线程已创建：side' })
-    expect(start).toHaveBeenCalledWith(expect.objectContaining({
-      provider: 'fork',
-      label: 'btw子线程',
-      request: expect.objectContaining({
-        parent,
-        prompt: [{ type: 'text', text: 'explain this' }],
-      }),
-    }))
 
-    const duplicate = await definition?.handler({
-      commandId: CommandId('cmd-2'),
-      agent: parent,
-      rawInput: '',
-      signal: new AbortController().signal,
-    })
-    expect(duplicate?.kind).toBe('error')
-    expect(start).toHaveBeenCalledTimes(1)
+    expect(result).toMatchObject({ kind: 'success' })
+    expect(create).toHaveBeenCalledTimes(1)
+    const options = create.mock.calls[0]?.[0]
+    expect(options?.sessionId).toMatch(/^session-btw-/u)
+    expect(parseBtwParentId(options?.sessionId ?? '')).toBe(parent.id)
+    expect(options?.seed).toEqual(parent.session.events)
+    expect(options?.meta).toEqual({ cwd: '/tmp/project' })
+    expect(options?.meta).not.toHaveProperty('parentSession')
+    expect(options?.agentOptions).toEqual(parent.options)
   })
 
-  it('does not expose a close command from the active side', async () => {
-    const { ctx, dispose } = await setup()
+  it('injects commands before registering the child-scoped close command', async () => {
+    const { ctx } = await setup('zh', true)
+    const parent = agent(ctx, 'parent')
+    const result = await ctx.commands.find(parent, 'btw')?.handler({
+      commandId: CommandId('cmd-isolated'), agent: parent, rawInput: '', signal: new AbortController().signal,
+    })
+
+    expect(result).toEqual({ kind: 'success', text: expect.any(String) })
+  })
+
+  it('pins the child to the main session permission preset before publication', async () => {
+    const { ctx } = await setup()
+    const set = vi.fn()
+    ctx.provide('permissionPresets', {
+      current: vi.fn(() => 'workspace-write'),
+      set,
+    } as never)
+    const parent = agent(ctx, 'parent')
+
+    await ctx.commands.find(parent, 'btw')?.handler({
+      commandId: CommandId('cmd-permission'), agent: parent, rawInput: '', signal: new AbortController().signal,
+    })
+
+    expect(set).toHaveBeenCalledWith(expect.objectContaining({ id: expect.stringMatching(/^session-btw-/u) }), 'workspace-write')
+  })
+
+  it('opens an empty side session without starting a model turn', async () => {
+    const { ctx, create } = await setup()
+    const parent = agent(ctx, 'parent')
+    await ctx.commands.find(parent, 'btw')?.handler({
+      commandId: CommandId('cmd-empty'), agent: parent, rawInput: '', signal: new AbortController().signal,
+    })
+    const created = await create.mock.results[0]?.value
+    expect(created?.agent.followup).not.toHaveBeenCalled()
+  })
+
+  it('rejects nested and duplicate side sessions', async () => {
+    const { ctx, create } = await setup()
     const parent = agent(ctx, 'parent')
     const definition = ctx.commands.find(parent, 'btw')
     await definition?.handler({
-      commandId: CommandId('cmd-open'),
-      agent: parent,
-      rawInput: '',
-      signal: new AbortController().signal,
+      commandId: CommandId('cmd-open'), agent: parent, rawInput: '', signal: new AbortController().signal,
     })
-    const side = agent(ctx, 'side')
-    const nested = await definition?.handler({
-      commandId: CommandId('cmd-nested'),
-      agent: side,
-      rawInput: '',
-      signal: new AbortController().signal,
+    const child = (await create.mock.results[0]?.value)?.agent
+    const nested = child === undefined ? undefined : await definition?.handler({
+      commandId: CommandId('cmd-nested'), agent: child, rawInput: '', signal: new AbortController().signal,
     })
     expect(nested).toEqual({ kind: 'error', text: '子线程中不能再次创建子线程。' })
-    expect(dispose).not.toHaveBeenCalled()
+    const duplicate = await definition?.handler({
+      commandId: CommandId('cmd-duplicate'), agent: parent, rawInput: '', signal: new AbortController().signal,
+    })
+    expect(duplicate?.kind).toBe('error')
+    expect(create).toHaveBeenCalledTimes(1)
   })
 
-  it('switches command metadata and outcomes with the Harness locale setting', async () => {
-    const { ctx, start } = await setup('zh')
-    const parent = agent(ctx, 'parent', false)
-    expect(ctx.commands.find(parent, 'btw')).toMatchObject({
-      description: '创建一个临时会话继承当前的上下文，用于临时聊天',
-      input: { hint: '给智能体发消息' },
-    })
-
-    ctx.emit(
-      'settings/updated',
-      settingsNamespace('locale'),
-      { preference: 'en' },
-      { preference: 'zh' },
-      'update',
-    )
-    const english = ctx.commands.find(parent, 'btw')
-    expect(english).toMatchObject({
-      description: 'Create a temporary session that inherits the current context for a quick side chat',
-      input: { hint: 'Message the agent' },
-    })
-    const result = await english?.handler({
-      commandId: CommandId('cmd-en'),
-      agent: parent,
-      rawInput: '',
-      signal: new AbortController().signal,
-    })
-    expect(result).toEqual({
-      kind: 'error',
-      text: 'Complete at least one turn in the main thread before using /btw.',
-    })
-    expect(start).not.toHaveBeenCalled()
-  })
-
-  it('creates an English-labeled child when English is selected', async () => {
-    const { ctx, start } = await setup('en')
-    const parent = agent(ctx, 'parent')
-    const result = await ctx.commands.find(parent, 'btw')?.handler({
-      commandId: CommandId('cmd-en-open'),
-      agent: parent,
-      rawInput: ' hello',
-      signal: new AbortController().signal,
-    })
-    expect(result).toEqual({ kind: 'success', text: 'Side thread created: side' })
-    expect(start).toHaveBeenCalledWith(expect.objectContaining({
-      label: 'btw side thread',
-      request: expect.objectContaining({ prompt: [{ type: 'text', text: 'hello' }] }),
-    }))
-  })
-
-  it('relabels an active child when the Harness locale changes', async () => {
-    const { ctx, relabel } = await setup('en')
+  it('exposes a private close command only accepted by a live BTW agent', async () => {
+    const { ctx, create } = await setup('zh', true)
     const parent = agent(ctx, 'parent')
     await ctx.commands.find(parent, 'btw')?.handler({
-      commandId: CommandId('cmd-open-en'),
-      agent: parent,
-      rawInput: '',
-      signal: new AbortController().signal,
+      commandId: CommandId('cmd-open'), agent: parent, rawInput: '', signal: new AbortController().signal,
     })
+    const child = (await create.mock.results[0]?.value)?.agent
+    const close = child === undefined ? undefined : await ctx.commands.find(child, 'btw-close')?.handler({
+      commandId: CommandId('cmd-close'), agent: child, rawInput: '', signal: new AbortController().signal,
+    })
+    expect(close).toEqual({ kind: 'success' })
+  })
 
-    ctx.emit(
-      'settings/updated',
-      settingsNamespace('locale'),
-      { preference: 'zh' },
-      { preference: 'en' },
-      'update',
-    )
-
-    expect(relabel).toHaveBeenCalledWith('btw子线程')
+  it('switches command copy with the Harness locale setting', async () => {
+    const { ctx } = await setup('zh')
+    const parent = agent(ctx, 'parent', false)
+    expect(ctx.commands.find(parent, 'btw')?.description).toContain('临时会话')
+    ctx.emit('settings/updated', settingsNamespace('locale'), { preference: 'en' }, { preference: 'zh' }, 'update')
+    expect(ctx.commands.find(parent, 'btw')?.description).toContain('temporary session')
   })
 })

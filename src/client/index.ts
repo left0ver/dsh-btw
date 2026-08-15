@@ -3,8 +3,9 @@
 import type { ClientContext, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
-import { BtwHeaderAction, btwAddress, type BtwHeaderInjected } from './BtwHeaderAction.tsx'
+import { BtwHeaderAction, type BtwHeaderInjected } from './BtwHeaderAction.tsx'
 import { BtwThreadIndicator } from './BtwThreadIndicator.tsx'
+import { forgetBtwPair, rememberBtwPair } from './btw-state.ts'
 import { BTW_LOCALE_NS, en, zh, type BtwLocaleKey } from '../locales.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -17,21 +18,21 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 export const inject = ['sessions', 'slots', 'locale']
 
 interface BtwNavigation {
-  refreshSubagents(parentId: SessionId): Promise<void>
-  openSubagent(address: ReturnType<typeof btwAddress>): void
+  open(id: SessionId): void
 }
 
-/** Refresh the parent catalog, then open the child through its known durable address. */
+/** Remember the local pair, then open the parentless temporary session. */
 export async function openBtwSide(
   sessions: BtwNavigation,
   parentId: SessionId,
   childId: SessionId,
 ): Promise<boolean> {
-  await sessions.refreshSubagents(parentId)
+  rememberBtwPair(parentId, childId)
   try {
-    sessions.openSubagent(btwAddress(parentId, childId))
+    sessions.open(childId)
     return true
   } catch {
+    forgetBtwPair(parentId, childId)
     return false
   }
 }
@@ -40,19 +41,25 @@ export async function openBtwSide(
 export function apply(ctx: ClientContext): void {
   const sessions = ctx.sessions
   ctx.effect(() => ctx.locale.register(BTW_LOCALE_NS, { zh, en }), 'dsh-btw: dictionaries')
+  const focusComposer = (): void => {
+    requestAnimationFrame(() => {
+      document.querySelector<HTMLTextAreaElement>('textarea')?.focus()
+    })
+  }
   const injected = (): BtwHeaderInjected => ({
-    open(id) {
-      sessions.open(id)
-    },
     async openSide(parentId, childId) {
       if (!await openBtwSide(sessions, parentId, childId)) return false
-      requestAnimationFrame(() => {
-        document.querySelector<HTMLTextAreaElement>('textarea')?.focus()
-      })
+      focusComposer()
       return true
     },
-    refreshSubagents(parentId) {
-      return sessions.refreshSubagents(parentId)
+    async openSession(sessionId) {
+      try {
+        sessions.open(sessionId)
+        focusComposer()
+        return true
+      } catch {
+        return false
+      }
     },
   })
   ctx.slots.inject(
