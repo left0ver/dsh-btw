@@ -1,9 +1,5 @@
-/** Runtime copy shared by the Host command and the browser UI. */
-
-/** Locale namespace owned by dsh-btw. */
 export const BTW_LOCALE_NS = 'btw'
 
-/** Simplified Chinese dictionary (the key-set source of truth). */
 export const zh = {
   'command.description': '创建一个临时会话继承当前的上下文，用于临时聊天',
   'command.hint': '给智能体发消息',
@@ -20,10 +16,8 @@ export const zh = {
   'header.backChild': '返回子线程',
 } as const
 
-/** Dictionary key domain. */
 export type BtwLocaleKey = keyof typeof zh
 
-/** English dictionary, checked against the Chinese key set. */
 export const en: Record<BtwLocaleKey, string> = {
   'command.description': 'Create a temporary session that inherits the current context for a quick side chat',
   'command.hint': 'Message the agent',
@@ -40,10 +34,8 @@ export const en: Record<BtwLocaleKey, string> = {
   'header.backChild': 'Back to side thread',
 }
 
-/** Locales supported by DeepSeek Harness. */
 export type BtwLocaleId = 'zh' | 'en'
 
-/** Resolve and interpolate one Host-side string. */
 export function btwText(
   locale: BtwLocaleId,
   key: BtwLocaleKey,
@@ -55,7 +47,6 @@ export function btwText(
     name in params ? String(params[name]) : match)
 }
 
-/** Read the locale preference shape without depending on its schema owner. */
 export function resolveBtwLocale(value: unknown): BtwLocaleId {
   if (typeof value !== 'object' || value === null || !('preference' in value)) return 'zh'
   return (value as { preference?: unknown }).preference === 'en' ? 'en' : 'zh'

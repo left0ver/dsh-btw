@@ -6,16 +6,15 @@ import type { ConversationSnapshot, SessionId, SessionListState } from '@deepsee
 import type { InputState } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { BtwHeaderAction, type BtwHeaderActionProps } from '../src/client/BtwHeaderAction.tsx'
 import { BtwThreadIndicator } from '../src/client/BtwThreadIndicator.tsx'
-import { BTW_OPENED_PREFIX } from '../src/protocol.ts'
 import { btwText, type BtwLocaleId } from '../src/locales.ts'
-import { clearBtwPairs, rememberBtwPair } from '../src/client/btw-state.ts'
+import { btwNavigation } from '../src/client/btw-state.ts'
 
 const parentId = 'parent' as SessionId
 const childId = 'child' as SessionId
 
 afterEach(() => {
   cleanup()
-  clearBtwPairs()
+  btwNavigation.clear()
   vi.restoreAllMocks()
 })
 
@@ -43,7 +42,7 @@ function props(options: {
   locale?: BtwLocaleId
 } = {}): BtwHeaderActionProps {
   const side = options.side ?? false
-  if (options.pair === true) rememberBtwPair(parentId, childId)
+  if (options.pair === true) btwNavigation.remember(parentId, childId)
   const locale = options.locale ?? 'zh'
   const snapshot = { nodes: options.nodes ?? [], running: false } as ConversationSnapshot
   const inputState = options.inputState ?? {
@@ -66,7 +65,7 @@ function props(options: {
 function openedNode(seq = 7): ConversationSnapshot['nodes'][number] {
   return {
     kind: 'command', seq, time: 1, commandId: `cmd-${seq}` as never, name: 'btw', args: null,
-    outcome: { kind: 'success', text: `${BTW_OPENED_PREFIX}${childId}` },
+    outcome: { kind: 'success', text: `BTW 会话已打开：${childId}` },
   }
 }
 
@@ -131,7 +130,7 @@ describe('BtwHeaderAction', () => {
     const side = render(<BtwHeaderAction {...props({ side: true, pair: true, locale: 'en' })} />)
     expect(side.getByRole('button', { name: 'Back to main thread' })).toBeTruthy()
     side.unmount()
-    clearBtwPairs()
+    btwNavigation.clear()
     const parent = render(<BtwHeaderAction {...props({ pair: true, locale: 'en' })} />)
     expect(parent.getByRole('button', { name: 'Back to side thread' })).toBeTruthy()
   })

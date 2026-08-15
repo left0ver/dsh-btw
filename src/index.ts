@@ -1,5 +1,3 @@
-/** Host half of the Codex-style `/btw` side-conversation plugin. */
-
 import { randomUUID } from 'node:crypto'
 import { rmdir, unlink } from 'node:fs/promises'
 import { basename, dirname } from 'node:path'
@@ -16,7 +14,6 @@ import { btwSessionId } from './protocol.ts'
 export const name = 'btw'
 export const inject = ['commands', 'agents', 'sessionPersistence']
 
-/** Host configuration. */
 export interface Config {}
 
 export const Config: z<Config> = z.object({})
@@ -53,8 +50,7 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-/** Snapshot everything before this `/btw` command, provided the source is between turns. */
-export function completedContextSeed(
+function completedContextSeed(
   agent: Agent,
   commandId: CommandInvocation['commandId'],
 ): readonly SessionEvent[] | undefined {
@@ -91,16 +87,16 @@ async function removeOwnedJsonlArtifact(ctx: Context, agent: Agent): Promise<voi
   }
 }
 
-/** Register `/btw`, creating parentless AgentHandles rather than subagents. */
 export function apply(ctx: Context, _config: Config): void {
-  const activeByParent = new Map<SessionId, ActiveBtw>()
-  const activeByChild = new Map<SessionId, ActiveBtw>()
+  const activeById = new Map<SessionId, ActiveBtw>()
   const starting = new Set<SessionId>()
   let locale: BtwLocaleId = resolveBtwLocale(ctx.get('settings')?.get(LOCALE_SETTINGS_NAMESPACE))
+  const text = (key: Parameters<typeof btwText>[1], params?: Readonly<Record<string, unknown>>) =>
+    btwText(locale, key, params)
 
   const forgetEntry = (entry: ActiveBtw): void => {
-    if (activeByParent.get(entry.parentId) === entry) activeByParent.delete(entry.parentId)
-    if (activeByChild.get(entry.childId) === entry) activeByChild.delete(entry.childId)
+    if (activeById.get(entry.parentId) === entry) activeById.delete(entry.parentId)
+    if (activeById.get(entry.childId) === entry) activeById.delete(entry.childId)
   }
 
   const closeEntry = async (entry: ActiveBtw): Promise<void> => {
@@ -115,7 +111,7 @@ export function apply(ctx: Context, _config: Config): void {
     }
     try {
       await entry.handle.dispose()
-      // session/disposed starts persistence retirement asynchronously.
+      // Persistence retirement starts asynchronously from session/disposed.
       await new Promise<void>(resolve => { setTimeout(resolve, 0) })
       await removeOwnedJsonlArtifact(ctx, child)
     } catch (error: unknown) {
@@ -123,38 +119,29 @@ export function apply(ctx: Context, _config: Config): void {
     }
   }
 
-  const deferClose = (entry: ActiveBtw): void => {
-    setTimeout(() => { void closeEntry(entry) }, CLOSE_DELAY_MS)
-  }
-
   ctx.effect(() => async () => {
-    await Promise.allSettled([...activeByChild.values()].map(closeEntry))
-    activeByParent.clear()
-    activeByChild.clear()
+    await Promise.allSettled([...new Set(activeById.values())].map(closeEntry))
+    activeById.clear()
     starting.clear()
   }, 'btw.sessions()')
 
   ctx.on('agent/disposed', ({ agent }) => {
-    const parentEntry = activeByParent.get(agent.id)
-    if (parentEntry !== undefined) {
-      void closeEntry(parentEntry)
-      return
-    }
-    const childEntry = activeByChild.get(agent.id)
-    if (childEntry !== undefined) forgetEntry(childEntry)
+    const entry = activeById.get(agent.id)
+    if (entry === undefined) return
+    if (entry.parentId === agent.id) void closeEntry(entry)
+    else forgetEntry(entry)
   })
 
   const handler = async ({ agent, commandId, rawInput, signal }: CommandInvocation) => {
-    const text = (key: Parameters<typeof btwText>[1], params?: Readonly<Record<string, unknown>>) =>
-      btwText(locale, key, params)
-    if (activeByChild.has(agent.id)) {
+    const activeEntry = activeById.get(agent.id)
+    if (activeEntry?.childId === agent.id) {
       return { kind: 'error' as const, text: text('command.error.nested') }
     }
     const seed = completedContextSeed(agent, commandId)
     if (seed === undefined) {
       return { kind: 'error' as const, text: text('command.error.noCompletedTurn') }
     }
-    if (activeByParent.has(agent.id) || starting.has(agent.id)) {
+    if (activeEntry !== undefined || starting.has(agent.id)) {
       return { kind: 'error' as const, text: text('command.error.duplicate') }
     }
 
@@ -195,8 +182,8 @@ export function apply(ctx: Context, _config: Config): void {
       const sessionTitle = ctx.get('sessionTitle') as SessionTitlePort | undefined
       sessionTitle?.rename(handle.agent.session, text('thread.title'))
       const entry: ActiveBtw = { parentId: agent.id, childId, handle, closing: false }
-      activeByParent.set(agent.id, entry)
-      activeByChild.set(childId, entry)
+      activeById.set(agent.id, entry)
+      activeById.set(childId, entry)
 
       const prompt = rawInput.trim()
       if (prompt !== '') {
@@ -215,9 +202,9 @@ export function apply(ctx: Context, _config: Config): void {
   }
 
   const closeHandler = ({ agent }: CommandInvocation) => {
-    const entry = activeByChild.get(agent.id)
-    if (entry === undefined) return { kind: 'error' as const, text: 'Not a live BTW session.' }
-    deferClose(entry)
+    const entry = activeById.get(agent.id)
+    if (entry?.childId !== agent.id) return { kind: 'error' as const, text: 'Not a live BTW session.' }
+    setTimeout(() => { void closeEntry(entry) }, CLOSE_DELAY_MS)
     return { kind: 'success' as const }
   }
 

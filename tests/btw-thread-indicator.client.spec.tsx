@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import type { SessionId, SessionListState } from '@deepseek-ai/dsh-client-runtime/client'
 import { BtwThreadIndicator } from '../src/client/BtwThreadIndicator.tsx'
 import { btwText, type BtwLocaleId } from '../src/locales.ts'
-import { clearBtwPairs, rememberBtwPair } from '../src/client/btw-state.ts'
+import { btwNavigation } from '../src/client/btw-state.ts'
 
 const parentId = 'parent' as SessionId
 const childId = 'child' as SessionId
@@ -15,12 +15,12 @@ const translate = (locale: BtwLocaleId) =>
 
 afterEach(() => {
   cleanup()
-  clearBtwPairs()
+  btwNavigation.clear()
 })
 
 function state(current: 'ordinary' | 'main' | 'child'): SessionListState {
   const hasSideThread = current !== 'ordinary'
-  if (hasSideThread) rememberBtwPair(parentId, childId)
+  if (hasSideThread) btwNavigation.remember(parentId, childId)
   return {
     ids: [parentId],
     byId: {

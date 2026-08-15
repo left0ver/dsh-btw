@@ -4,7 +4,7 @@ import type { Agent, CreateAgentOptions } from '@deepseek-ai/dsh-agent'
 import CommandRuntime, { CommandId } from '@deepseek-ai/dsh-commands'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
-import { apply, completedContextSeed } from '../src/index.ts'
+import { apply } from '../src/index.ts'
 import { parseBtwParentId } from '../src/protocol.ts'
 
 const contexts: Context[] = []
@@ -60,21 +60,6 @@ async function setup(locale: 'zh' | 'en' = 'zh', isolatedChild = false) {
 }
 
 describe('/btw host command', () => {
-  it('cuts the snapshot immediately before the current command lifecycle', () => {
-    const ctx = new Context()
-    contexts.push(ctx)
-    const parent = agent(ctx, 'parent')
-    const commandId = CommandId('cmd-cut')
-    const events = [
-      ...parent.session.events,
-      { type: 'sandbox/mode', seq: 1, time: 2, data: { mode: 'workspace-write', source: 'user' } },
-      { type: 'command/run', seq: 2, time: 3, data: { commandId, name: 'btw', source: { kind: 'user' } } },
-    ] as unknown as typeof parent.session.events
-    Object.defineProperty(parent.session, 'events', { value: events })
-
-    expect(completedContextSeed(parent, commandId)).toEqual(events.slice(0, 2))
-  })
-
   it('loads without the subagent service', async () => {
     const { ctx } = await setup()
     expect(ctx.commands.find(agent(ctx, 'parent'), 'btw')).toBeDefined()
@@ -93,8 +78,17 @@ describe('/btw host command', () => {
   it('creates a parentless agent with copied context and inherited runtime options', async () => {
     const { ctx, create } = await setup()
     const parent = agent(ctx, 'parent')
+    const commandId = CommandId('cmd-open')
+    const seed = [
+      ...parent.session.events,
+      { type: 'sandbox/mode', seq: 1, time: 2, data: { mode: 'workspace-write', source: 'user' } },
+    ] as unknown as typeof parent.session.events
+    Object.defineProperty(parent.session, 'events', { value: [
+      ...seed,
+      { type: 'command/run', seq: 2, time: 3, data: { commandId, name: 'btw', source: { kind: 'user' } } },
+    ] })
     const result = await ctx.commands.find(parent, 'btw')?.handler({
-      commandId: CommandId('cmd-open'), agent: parent, rawInput: ' explain this', signal: new AbortController().signal,
+      commandId, agent: parent, rawInput: ' explain this', signal: new AbortController().signal,
     })
 
     expect(result).toMatchObject({ kind: 'success' })
@@ -102,7 +96,7 @@ describe('/btw host command', () => {
     const options = create.mock.calls[0]?.[0]
     expect(options?.sessionId).toMatch(/^session-btw-/u)
     expect(parseBtwParentId(options?.sessionId ?? '')).toBe(parent.id)
-    expect(options?.seed).toEqual(parent.session.events)
+    expect(options?.seed).toEqual(seed)
     expect(options?.meta).toEqual({ cwd: '/tmp/project' })
     expect(options?.meta).not.toHaveProperty('parentSession')
     expect(options?.agentOptions).toEqual(parent.options)
