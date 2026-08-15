@@ -39,13 +39,14 @@ function props(options: {
   nodes?: ConversationSnapshot['nodes']
   openSide?: (parent: SessionId, child: SessionId) => Promise<boolean>
   openSession?: (sessionId: SessionId) => Promise<boolean>
+  inputState?: InputState
   locale?: BtwLocaleId
 } = {}): BtwHeaderActionProps {
   const side = options.side ?? false
   if (options.pair === true) rememberBtwPair(parentId, childId)
   const locale = options.locale ?? 'zh'
   const snapshot = { nodes: options.nodes ?? [], running: false } as ConversationSnapshot
-  const inputState = {
+  const inputState = options.inputState ?? {
     draft: '', imageIds: [], draftRev: 0, phase: 'plain', occurrences: [], queue: [],
   } as InputState
   return {
@@ -74,6 +75,23 @@ describe('BtwHeaderAction', () => {
     const openSide = vi.fn().mockResolvedValue(true)
     const view = render(<BtwHeaderAction {...props({ openSide })} />)
     view.rerender(<BtwHeaderAction {...props({ openSide, nodes: [openedNode()] })} />)
+    await waitFor(() => expect(openSide).toHaveBeenCalledWith(parentId, childId))
+  })
+
+  it('waits for the submitted /btw draft to clear before opening the child', async () => {
+    const openSide = vi.fn().mockResolvedValue(true)
+    const submitting = {
+      draft: '/btw hi', imageIds: [], draftRev: 1, phase: 'submitting', occurrences: [], queue: [],
+    } as InputState
+    const settled = {
+      ...submitting, draft: '', draftRev: 2, phase: 'plain', claim: undefined,
+    } as InputState
+    const view = render(<BtwHeaderAction {...props({ openSide, inputState: submitting })} />)
+
+    view.rerender(<BtwHeaderAction {...props({ openSide, inputState: submitting, nodes: [openedNode()] })} />)
+    expect(openSide).not.toHaveBeenCalled()
+
+    view.rerender(<BtwHeaderAction {...props({ openSide, inputState: settled, nodes: [openedNode()] })} />)
     await waitFor(() => expect(openSide).toHaveBeenCalledWith(parentId, childId))
   })
 

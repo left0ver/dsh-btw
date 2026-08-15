@@ -26,12 +26,15 @@ export function BtwHeaderAction({
   sessionId,
   useSession,
   useSessions,
+  useInput,
   openSide,
   openSession,
   t,
 }: BtwHeaderActionProps) {
   const nodes = useSession(snapshot => snapshot.nodes)
   const sessions = useSessions(state => state)
+  const inputDraft = useInput(state => state.draft)
+  const inputPhase = useInput(state => state.phase)
   const openedNode = nodes.findLast(node => node.kind === 'command'
     && node.name === 'btw'
     && node.outcome?.kind === 'success'
@@ -59,11 +62,15 @@ export function BtwHeaderAction({
 
   useEffect(() => {
     if (opened?.kind !== 'command' || opened.seq === handledOpen.current) return
+    // The command flow node can arrive before the command RPC settles. Opening
+    // the child at that point unmounts the parent input shell, aborting the
+    // settlement that clears its persisted draft. Wait for that commit first.
+    if (inputPhase !== 'plain' || inputDraft !== '') return
     const childId = parseBtwOpenedOutcome(opened.outcome?.text)
     if (childId === undefined) return
     handledOpen.current = opened.seq
     void openSide(sessionId, childId as SessionId)
-  }, [opened, openSide, sessionId])
+  }, [inputDraft, inputPhase, opened, openSide, sessionId])
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {

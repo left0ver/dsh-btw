@@ -9,5 +9,5 @@ export interface BtwHeaderInjected {
 /** Full header-action props. */
 export type BtwHeaderActionProps = PropsRuntime<'conversation.session.header.actions'> & PropsLocale<typeof BTW_LOCALE_NS> & BtwHeaderInjected;
 /** Header controls and keyboard policy for one current main or BTW session. */
-export declare function BtwHeaderAction({ sessionId, useSession, useSessions, openSide, openSession, t, }: BtwHeaderActionProps): import("react").JSX.Element | null;
+export declare function BtwHeaderAction({ sessionId, useSession, useSessions, useInput, openSide, openSession, t, }: BtwHeaderActionProps): import("react").JSX.Element | null;
 //# sourceMappingURL=BtwHeaderAction.d.ts.map
