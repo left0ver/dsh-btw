@@ -3,6 +3,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import { BtwHeaderAction, type BtwHeaderInjected } from './BtwHeaderAction.tsx'
 import { BtwThreadIndicator } from './BtwThreadIndicator.tsx'
+import { watchBtwLifetime } from './btw-lifetime.ts'
 import { btwNavigation } from './btw-state.ts'
 import { BTW_LOCALE_NS, en, zh, type BtwLocaleKey } from '../locales.ts'
 
@@ -36,6 +37,7 @@ export async function openBtwSide(
 export function apply(ctx: ClientContext): void {
   const sessions = ctx.sessions
   ctx.effect(() => ctx.locale.register(BTW_LOCALE_NS, { zh, en }), 'dsh-btw: dictionaries')
+  ctx.effect(() => watchBtwLifetime(sessions, document), 'dsh-btw: temporary session lifetime')
   const focusComposer = (): void => {
     requestAnimationFrame(() => {
       document.querySelector<HTMLTextAreaElement>('textarea')?.focus()

@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent, CreateAgentOptions } from '@deepseek-ai/dsh-agent'
 import CommandRuntime, { CommandId } from '@deepseek-ai/dsh-commands'
@@ -8,9 +11,12 @@ import { apply } from '../src/index.ts'
 import { parseBtwParentId } from '../src/protocol.ts'
 
 const contexts: Context[] = []
+const temporaryRoots: string[] = []
 
 afterEach(async () => {
+  vi.useRealTimers()
   for (const ctx of contexts.splice(0).reverse()) await ctx.fiber.dispose()
+  await Promise.all(temporaryRoots.splice(0).map(path => rm(path, { recursive: true, force: true })))
 })
 
 function agent(ctx: Context, id: string, completed = true): Agent {
@@ -29,13 +35,17 @@ function agent(ctx: Context, id: string, completed = true): Agent {
   } as unknown as Agent
 }
 
-async function setup(locale: 'zh' | 'en' = 'zh', isolatedChild = false) {
+async function setup(
+  locale: 'zh' | 'en' = 'zh',
+  isolatedChild = false,
+  locate: () => { readonly kind: string; readonly path: string } | undefined = () => undefined,
+) {
   const ctx = new Context()
   contexts.push(ctx)
   await ctx.plugin(CommandRuntime)
   ctx.provide('settings', { get: () => ({ preference: locale }) } as never)
   ctx.provide('sessions', { flush: vi.fn().mockResolvedValue(false) } as never)
-  ctx.provide('sessionPersistence', { locate: vi.fn(() => undefined) } as never)
+  ctx.provide('sessionPersistence', { locate: vi.fn(locate) } as never)
   const dispose = vi.fn().mockResolvedValue(undefined)
   const create = vi.fn(async (options: CreateAgentOptions) => {
     let child: Agent
@@ -158,16 +168,29 @@ describe('/btw host command', () => {
   })
 
   it('exposes a private close command only accepted by a live BTW agent', async () => {
-    const { ctx, create } = await setup('zh', true)
+    vi.useFakeTimers()
+    const temporaryRoot = await mkdtemp(join(tmpdir(), 'dsh-btw-test-'))
+    temporaryRoots.push(temporaryRoot)
+    let artifactPath: string | undefined
+    const { ctx, create, dispose } = await setup('zh', true, () => artifactPath === undefined
+      ? undefined
+      : { kind: 'jsonl', path: artifactPath })
     const parent = agent(ctx, 'parent')
     await ctx.commands.find(parent, 'btw')?.handler({
       commandId: CommandId('cmd-open'), agent: parent, rawInput: '', signal: new AbortController().signal,
     })
     const child = (await create.mock.results[0]?.value)?.agent
-    const close = child === undefined ? undefined : await ctx.commands.find(child, 'btw-close')?.handler({
+    if (child === undefined) throw new Error('temporary agent was not created')
+    artifactPath = join(temporaryRoot, child.id, 'session.jsonl')
+    await mkdir(join(temporaryRoot, child.id), { recursive: true })
+    await writeFile(artifactPath, '{"type":"session/created"}\n')
+    const close = await ctx.commands.find(child, 'btw-close')?.handler({
       commandId: CommandId('cmd-close'), agent: child, rawInput: '', signal: new AbortController().signal,
     })
     expect(close).toEqual({ kind: 'success' })
+    await vi.runAllTimersAsync()
+    expect(dispose).toHaveBeenCalledTimes(1)
+    await expect(access(artifactPath)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   it('switches command copy with the Harness locale setting', async () => {

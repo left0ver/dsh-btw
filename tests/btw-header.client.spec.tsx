@@ -107,7 +107,7 @@ describe('BtwHeaderAction', () => {
     await waitFor(() => expect(openSide).toHaveBeenCalledWith(parentId, childId))
   })
 
-  it('switches to the main session without closing the temporary session with Ctrl+/', async () => {
+  it('switches to the main session with Ctrl+/', async () => {
     const openSession = vi.fn().mockResolvedValue(true)
     render(<BtwHeaderAction {...props({ side: true, pair: true, openSession })} />)
     fireEvent.keyDown(document, { code: 'Slash', key: '/', ctrlKey: true })

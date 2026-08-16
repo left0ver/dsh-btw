@@ -128,8 +128,7 @@ export function apply(ctx: Context, _config: Config): void {
   ctx.on('agent/disposed', ({ agent }) => {
     const entry = activeById.get(agent.id)
     if (entry === undefined) return
-    if (entry.parentId === agent.id) void closeEntry(entry)
-    else forgetEntry(entry)
+    void closeEntry(entry)
   })
 
   const handler = async ({ agent, commandId, rawInput, signal }: CommandInvocation) => {
